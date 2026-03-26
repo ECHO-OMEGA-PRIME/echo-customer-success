@@ -1,0 +1,30 @@
+name = "echo-customer-success"
+main = "src/index.ts"
+compatibility_date = "2024-12-01"
+
+[observability]
+enabled = true
+
+[[d1_databases]]
+binding = "DB"
+database_name = "echo-customer-success"
+database_id = "e67e5836-7202-46d9-8deb-6a8e0e30dce7"
+
+[[kv_namespaces]]
+binding = "CS_CACHE"
+id = "4ce38c58f47b4a04b70e0e5182ef3e87"
+
+[triggers]
+crons = ["0 7 * * *"]
+
+[[services]]
+binding = "ENGINE_RUNTIME"
+service = "echo-engine-runtime"
+
+[[services]]
+binding = "SHARED_BRAIN"
+service = "echo-shared-brain"
+
+[[services]]
+binding = "EMAIL_SENDER"
+service = "echo-email-sender"
