@@ -13,6 +13,10 @@ function ipAddr(req: Request): string { return req.headers.get('CF-Connecting-IP
 function now(): string { return new Date().toISOString().slice(0, 19).replace('T', ' '); }
 function today(): string { return new Date().toISOString().slice(0, 10); }
 
+function log(level: string, message: string, meta: Record<string, any> = {}) {
+  console.log(JSON.stringify({ ts: new Date().toISOString(), level, worker: 'echo-customer-success', message, ...meta }));
+}
+
 function calcHealthScore(signals: Record<string, unknown>[], weights: Record<string, number>): number {
   const categoryScores: Record<string, { total: number; count: number }> = {};
   for (const s of signals) {
@@ -37,13 +41,13 @@ export default {
     if (req.method === 'OPTIONS') return new Response(null, { headers: { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET,POST,PUT,DELETE,OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type,X-Echo-API-Key,Authorization' } });
     const url = new URL(req.url); const p = url.pathname; const m = req.method;
 
-    if (p === '/health' || p === '/') return jsonOk({ ok: true, service: 'echo-customer-success', version: '1.0.0', timestamp: now() });
-    if (m === 'GET' && !(await rateLimit(env.CS_CACHE, `rl:${ipAddr(req)}`, 60, 60000))) return jsonErr('Rate limited', 429);
-    if (m !== 'GET') { if (!authOk(req, env)) return jsonErr('Unauthorized', 401); if (!(await rateLimit(env.CS_CACHE, `rl:w:${ipAddr(req)}`, 30, 60000))) return jsonErr('Rate limited', 429); }
+    if (p === '/health' || p === '/') { log('info', 'Health check', { path: p, ip: ipAddr(req) }); return jsonOk({ ok: true, service: 'echo-customer-success', version: '1.1.0', timestamp: now() }); }
+    if (m === 'GET' && !(await rateLimit(env.CS_CACHE, `rl:${ipAddr(req)}`, 60, 60000))) { log('warn', 'Rate limited (read)', { path: p, ip: ipAddr(req) }); return jsonErr('Rate limited', 429); }
+    if (m !== 'GET') { if (!authOk(req, env)) { log('warn', 'Auth failure', { path: p, method: m, ip: ipAddr(req) }); return jsonErr('Unauthorized', 401); } if (!(await rateLimit(env.CS_CACHE, `rl:w:${ipAddr(req)}`, 30, 60000))) { log('warn', 'Rate limited (write)', { path: p, ip: ipAddr(req) }); return jsonErr('Rate limited', 429); } }
 
     const db = env.DB;
     let body: Record<string, unknown> = {};
-    if (m === 'POST' || m === 'PUT') { try { body = await req.json() as Record<string, unknown>; } catch { return jsonErr('Invalid JSON'); } }
+    if (m === 'POST' || m === 'PUT') { try { body = await req.json() as Record<string, unknown>; } catch { log('error', 'Invalid JSON body', { path: p, ip: ipAddr(req) }); return jsonErr('Invalid JSON'); } }
 
     // ── Organizations ──
     if (p === '/orgs' && m === 'GET') { return jsonOk({ ok: true, organizations: (await db.prepare('SELECT * FROM organizations WHERE status=?').bind('active').all()).results }); }
@@ -311,7 +315,7 @@ export default {
           body: JSON.stringify({ engine_category: 'business', query: `Analyze this customer account for retention risk and provide specific recommendations. Account: ${JSON.stringify(acct)}. Recent health signals: ${JSON.stringify(signals.results.slice(0, 10))}. Recent touchpoints: ${JSON.stringify(touchpoints.results.slice(0, 5))}. Provide: 1) Risk assessment, 2) Top 3 retention actions, 3) Ideal next touchpoint type and timing.` })
         });
         return jsonOk({ ok: true, account: acct, ai_recommendations: await resp.json() });
-      } catch { return jsonOk({ ok: true, account: acct, ai_recommendations: null }); }
+      } catch (e: any) { log('error', 'AI retention fetch failed', { accountId: accountId, error: e?.message || String(e) }); return jsonOk({ ok: true, account: acct, ai_recommendations: null }); }
     }
 
     // ── AI Health Score Analysis ──
@@ -325,7 +329,7 @@ export default {
           body: JSON.stringify({ engine_category: 'business', query: `Analyze this customer portfolio health and provide strategic recommendations. Accounts: ${JSON.stringify(accounts.results)}. Provide: 1) Portfolio risk assessment, 2) Accounts needing immediate attention, 3) Expansion opportunities, 4) NRR improvement strategy.` })
         });
         return jsonOk({ ok: true, accounts: accounts.results, ai_analysis: await resp.json() });
-      } catch { return jsonOk({ ok: true, accounts: accounts.results, ai_analysis: null }); }
+      } catch (e: any) { log('error', 'AI health analysis failed', { orgId: orgId, error: e?.message || String(e) }); return jsonOk({ ok: true, accounts: accounts.results, ai_analysis: null }); }
     }
 
     // ── Export ──
@@ -341,10 +345,12 @@ export default {
       return jsonOk({ ok: true, accounts: accounts.results });
     }
 
+    log('warn', 'Route not found', { path: p, method: m, ip: ipAddr(req) });
     return jsonErr('Not found', 404);
   },
 
   async scheduled(event: ScheduledEvent, env: Env) {
+    log('info', 'Scheduled job started', { cron: event.cron });
     const db = env.DB; const t = today(); const n = now();
     // Daily health snapshots per org
     const orgs = await db.prepare("SELECT id FROM organizations WHERE status='active'").all();
